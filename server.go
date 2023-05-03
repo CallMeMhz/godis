@@ -11,6 +11,7 @@ import (
 type Server struct {
 	lis  net.Listener
 	dict map[string]string
+	cmds chan Command
 }
 
 func NewServer(addr string) (*Server, error) {
@@ -21,16 +22,18 @@ func NewServer(addr string) (*Server, error) {
 	server := new(Server)
 	server.lis = listener
 	server.dict = make(map[string]string)
+	server.cmds = make(chan Command)
 	return server, nil
 }
 
-func (server *Server) Listen() error {
+func (server *Server) Serve() error {
+	go server.processCommand()
 	for {
 		conn, err := server.lis.Accept()
 		if err != nil {
 			return err
 		}
-		fmt.Println("client connected")
+		fmt.Println("client connected", conn.RemoteAddr())
 		go server.eventLoop(conn)
 	}
 }
@@ -42,7 +45,7 @@ func (server *Server) eventLoop(conn net.Conn) {
 		_, err := conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				fmt.Println("client disconnected")
+				fmt.Println("client disconnected", conn.RemoteAddr())
 				return
 			}
 			fmt.Println("err:", err)
@@ -50,6 +53,19 @@ func (server *Server) eventLoop(conn net.Conn) {
 		}
 		buf = buf[:bytes.LastIndexByte(buf, '\n')]
 		args := strings.Split(string(buf), " ")
+		server.cmds <- Command{args, conn}
+	}
+}
+
+type Command struct {
+	args []string
+	conn net.Conn
+}
+
+func (server *Server) processCommand() {
+	for cmd := range server.cmds {
+		args := cmd.args
+		conn := cmd.conn
 		switch args[0] {
 		case "set":
 			key, value := args[1], args[2]

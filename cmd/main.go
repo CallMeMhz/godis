@@ -10,7 +10,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := server.Listen(); err != nil {
+	if err := server.Serve(); err != nil {
 		panic(err)
 	}
 	fmt.Println("exit")
