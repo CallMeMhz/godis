@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"strings"
 )
 
 type Server struct {
@@ -89,12 +88,16 @@ func (server *Server) processCommand() {
 					fmt.Fprintln(conn, v)
 				case []byte:
 					fmt.Fprintln(conn, string(v))
-				case *LinkedList:
-					values := make([]string, v.length)
-					for i, elem := 0, v.head; elem != nil; i, elem = i+1, elem.next {
-						values[i] = string(elem.value)
+				case List:
+					values := v.GetAll()
+					fmt.Fprintf(conn, "[")
+					for i, value := range values {
+						if i > 0 {
+							fmt.Fprint(conn, ", ")
+						}
+						fmt.Fprint(conn, string(value))
 					}
-					fmt.Fprintln(conn, "[", strings.Join(values, ", "), "]")
+					fmt.Fprint(conn, "]\n")
 				default:
 					fmt.Fprintln(conn, v)
 				}
@@ -120,37 +123,50 @@ func (server *Server) processCommand() {
 			}
 			server.dict[key] = i64 + delta
 			fmt.Fprintln(conn, "OK")
-		case "lpush":
+		case "push", "rpush":
 			key, value := string(args[1]), args[2]
-			var ll *LinkedList
+			var l List
 			v, ok := server.dict[key]
 			if !ok {
-				ll = new(LinkedList)
-				server.dict[key] = ll
-			} else if ll, ok = v.(*LinkedList); !ok {
-				fmt.Fprintln(conn, "key is not linked list")
+				l = new(QuickList)
+				server.dict[key] = l
+			} else if l, ok = v.(List); !ok {
+				fmt.Fprintln(conn, "key is not a list")
 				continue
 			}
-			n := ll.Push(value)
-			fmt.Fprintln(conn, "(", n, ")")
-		case "lpop":
+			l.Push(value)
+			fmt.Fprintf(conn, "(%d)\n", l.Size())
+		case "pop", "rpop":
 			key := string(args[1])
 			v, ok := server.dict[key]
 			if !ok {
 				fmt.Fprintln(conn, "key not found")
 				continue
 			}
-			ll, ok := v.(*LinkedList)
+			ll, ok := v.(List)
 			if !ok {
 				fmt.Fprintln(conn, "key is not linked list")
 				continue
 			}
-			value, n := ll.Pop()
-			if n < 0 {
+			value := ll.Pop()
+			if value == nil {
 				fmt.Fprintln(conn, "empty linked list")
 			} else {
-				fmt.Fprintln(conn, string(value), "(", n, ")")
+				fmt.Fprintf(conn, "%s\n(%d)\n", string(value), ll.Size())
 			}
+		case "len":
+			key := string(args[1])
+			v, ok := server.dict[key]
+			if !ok {
+				fmt.Fprintln(conn, "key not found")
+				continue
+			}
+			ll, ok := v.(List)
+			if !ok {
+				fmt.Fprintln(conn, "key is not linked list")
+				continue
+			}
+			fmt.Fprintln(conn, ll.Size())
 		default:
 			fmt.Fprintln(conn, "invalid command")
 		}
