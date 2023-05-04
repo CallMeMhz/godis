@@ -63,6 +63,7 @@ type Command struct {
 }
 
 // fixme check arguments length is valid
+// todo reuse objects that will be deleted
 func (server *Server) processCommand() {
 	for cmd := range server.cmds {
 		args := cmd.args
@@ -104,6 +105,14 @@ func (server *Server) processCommand() {
 			} else {
 				fmt.Fprintln(conn, "key not found")
 			}
+		case "del":
+			key := string(args[1])
+			if _, ok := server.dict[key]; !ok {
+				fmt.Fprintln(conn, 0)
+				continue
+			}
+			delete(server.dict, key)
+			fmt.Fprintln(conn, 1)
 		case "incr":
 			key := string(args[1])
 			delta, err := strconv.ParseInt(string(args[2]), 10, 64)
