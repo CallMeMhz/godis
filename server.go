@@ -2,6 +2,7 @@ package godis
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -99,6 +100,33 @@ func (server *Server) processCommand() {
 						fmt.Fprint(conn, string(value))
 					}
 					fmt.Fprint(conn, "]\n")
+				case []int16:
+					fmt.Fprintf(conn, "[")
+					for i, value := range v {
+						if i > 0 {
+							fmt.Fprint(conn, ", ")
+						}
+						fmt.Fprint(conn, value)
+					}
+					fmt.Fprintf(conn, "]\n(%d)\n", len(v))
+				case []int32:
+					fmt.Fprintf(conn, "[")
+					for i, value := range v {
+						if i > 0 {
+							fmt.Fprint(conn, ", ")
+						}
+						fmt.Fprint(conn, value)
+					}
+					fmt.Fprintf(conn, "]\n(%d)\n", len(v))
+				case []int64:
+					fmt.Fprintf(conn, "[")
+					for i, value := range v {
+						if i > 0 {
+							fmt.Fprint(conn, ", ")
+						}
+						fmt.Fprint(conn, value)
+					}
+					fmt.Fprintf(conn, "]\n(%d)\n", len(v))
 				default:
 					fmt.Fprintln(conn, v)
 				}
@@ -176,6 +204,72 @@ func (server *Server) processCommand() {
 				continue
 			}
 			fmt.Fprintln(conn, ll.Size())
+		case "sadd":
+			key, value := string(args[1]), args[2]
+			if len(args) > 8 {
+				fmt.Fprintln(conn, "value is too big")
+				continue
+			}
+			i64, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				padding := 8 - len(value)
+				value = append(make([]byte, padding), value...)
+				i64 = int64(binary.BigEndian.Uint64(value))
+			}
+			fmt.Println("sadd", key, i64)
+			is, ok := server.dict[key]
+			if !ok {
+				server.dict[key] = createIntset(i64)
+				fmt.Fprintln(conn, "(1)")
+				continue
+			}
+			switch is.(type) {
+			case []int16, []int32, []int64:
+				is = intsetAdd(is, i64)
+				server.dict[key] = is
+				fmt.Fprintf(conn, "(%d)\n", sizeOfIntset(is))
+			default:
+				fmt.Fprintf(conn, "key is not a set")
+			}
+		case "sdel":
+			key, value := string(args[1]), args[2]
+			if len(args) > 8 {
+				fmt.Fprintln(conn, "value is too big")
+				continue
+			}
+			i64, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				padding := 8 - len(value)
+				value = append(make([]byte, padding), value...)
+				i64 = int64(binary.BigEndian.Uint64(value))
+			}
+			is, ok := server.dict[key]
+			if !ok {
+				fmt.Fprintln(conn, "key not found")
+				continue
+			}
+			switch is.(type) {
+			case []int16, []int32, []int64:
+				is = intsetDel(is, i64)
+				server.dict[key] = is
+				fmt.Fprintf(conn, "(%d)\n", sizeOfIntset(is))
+			default:
+				fmt.Fprintf(conn, "key is not a set")
+			}
+
+		case "slen":
+			key := string(args[1])
+			is, ok := server.dict[key]
+			if !ok {
+				fmt.Fprintln(conn, "key not found")
+				continue
+			}
+			if encodingOfIntset(is) == 0 {
+				fmt.Fprintln(conn, "key is not set")
+				continue
+			}
+			size := sizeOfIntset(is)
+			fmt.Fprintf(conn, "(%d)\n", size)
 		default:
 			fmt.Fprintln(conn, "invalid command")
 		}
