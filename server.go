@@ -106,15 +106,11 @@ func (server *Server) processCommand(cmd Command) {
 				StringSetInt(value.Bytes, i64)
 			} else {
 				if exists {
-					Free(value.ptr, value.cap)
+					Free(value.Bytes)
 				}
 				size := 1 + 8
 				value := Value{
-					Bytes: Bytes{
-						ptr: Malloc(size),
-						len: size,
-						cap: size,
-					},
+					Bytes:     Malloc(size),
 					typ:       TypeString,
 					timestamp: 0,
 					visited:   0,
@@ -125,15 +121,11 @@ func (server *Server) processCommand(cmd Command) {
 			}
 		} else {
 			if exists {
-				Free(value.ptr, value.cap)
+				Free(value.Bytes)
 			}
 			size := 1 + len(args[2])
 			value := Value{
-				Bytes: Bytes{
-					ptr: Malloc(size),
-					len: size,
-					cap: size,
-				},
+				Bytes:     Malloc(size),
 				typ:       TypeString,
 				timestamp: 0,
 				visited:   0,
@@ -172,8 +164,8 @@ func (server *Server) processCommand(cmd Command) {
 		}
 		delete(server.dict, key)
 		delete(server.expire, key)
-		Free(value.ptr, value.cap)
-		fmt.Println(conn, "OK")
+		Free(value.Bytes)
+		fmt.Fprintln(conn, "OK")
 	case "expire":
 		key := string(args[1])
 		delay, err := strconv.ParseInt(string(args[2]), 10, 64)

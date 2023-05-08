@@ -5,7 +5,7 @@ import "testing"
 func TestStringIncr(t *testing.T) {
 	str := String{
 		bytes: Bytes{
-			ptr: Malloc(1),
+			ptr: malloc(1),
 			len: 1,
 			cap: 1,
 		},
