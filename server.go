@@ -115,9 +115,8 @@ func (server *Server) getKey(shardId int, key string) (Value, bool) {
 		return Value{}, false
 	}
 	// lazy prune
-	if ddl, ok := server.expire[shardId][key]; ok && time.Now().UnixMilli() >= ddl {
-		delete(server.dicts[shardId], key)
-		delete(server.expire[shardId], key)
+	if ddl, ok := server.expire[shardId][key]; ok && time.Now().UnixNano() >= ddl {
+		server.delKey(shardId, key, value)
 		return Value{}, false
 	}
 	value.last = int32(time.Now().Unix())
@@ -237,12 +236,26 @@ func (server *Server) processCommand(cmd Command) {
 		}
 		if delay > 0 {
 			ttd := time.Now().Add(time.Duration(delay) * time.Millisecond)
-			server.expire[shardId][key] = ttd.UnixMilli()
+			server.expire[shardId][key] = ttd.UnixNano()
 			fmt.Fprintf(conn, "(TTD: %v)\n", ttd)
 		} else {
 			delete(server.expire[shardId], key)
 			fmt.Fprintln(conn, "(TTD: never forever)")
 		}
+	case "ttl":
+		key := string(args[1])
+		shardId := server.partitioner(key)
+		server.latchs[shardId].Lock()
+		defer server.latchs[shardId].Unlock()
+
+		if _, ok := server.getKey(shardId, key); !ok {
+			fmt.Fprintln(conn, "key not found")
+			return
+		}
+		nano := server.expire[shardId][key]
+		ttl := time.Unix(0, nano).Sub(time.Now()).Truncate(time.Millisecond)
+		fmt.Fprintf(conn, "%v\n", ttl)
+
 	case "incr":
 		key := string(args[1])
 		shardId := server.partitioner(key)
