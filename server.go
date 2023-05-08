@@ -2,7 +2,6 @@ package godis
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +11,7 @@ import (
 
 type Server struct {
 	lis    net.Listener
-	dict   map[string]any
+	dict   map[string]Value
 	expire map[string]int64
 	cmds   chan Command
 }
@@ -24,7 +23,7 @@ func NewServer(addr string) (*Server, error) {
 	}
 	server := new(Server)
 	server.lis = listener
-	server.dict = make(map[string]any)
+	server.dict = make(map[string]Value)
 	server.expire = make(map[string]int64)
 	server.cmds = make(chan Command)
 	return server, nil
@@ -79,15 +78,15 @@ func (server *Server) mainLoop() {
 	}
 }
 
-func (server *Server) getKey(key string) (any, bool) {
+func (server *Server) getKey(key string) (Value, bool) {
 	value, ok := server.dict[key]
 	if !ok {
-		return nil, false
+		return Value{}, false
 	}
 	if ddl, ok := server.expire[key]; ok && time.Now().UnixMilli() >= ddl {
 		delete(server.dict, key)
 		delete(server.expire, key)
-		return nil, false
+		return Value{}, false
 	}
 	return value, true
 }
@@ -99,12 +98,48 @@ func (server *Server) processCommand(cmd Command) {
 	conn := cmd.conn
 	switch string(args[0]) {
 	case "set":
-		key, value := string(args[1]), args[2]
-		fmt.Println("set", key, value)
-		if i64, err := strconv.ParseInt(string(value), 10, 64); err == nil {
-			server.dict[key] = i64
+		key := string(args[1])
+		value, exists := server.dict[key]
+		if i64, err := strconv.ParseInt(string(args[2]), 10, 64); err == nil {
+			if exists && value.typ == TypeString && StringEncoding(value.Bytes) == StringEncodingInteger {
+				StringSetInt(value.Bytes, i64)
+			} else {
+				if exists {
+					Free(value.ptr, value.cap)
+				}
+				size := 1 + 8
+				value := Value{
+					Bytes: Bytes{
+						ptr: Malloc(size),
+						len: size,
+						cap: size,
+					},
+					typ:       TypeString,
+					timestamp: 0,
+					visited:   0,
+					padding:   0,
+				}
+				server.dict[key] = value
+				StringSetInt(value.Bytes, i64)
+			}
 		} else {
+			if exists {
+				Free(value.ptr, value.cap)
+			}
+			size := 1 + len(args[2])
+			value := Value{
+				Bytes: Bytes{
+					ptr: Malloc(size),
+					len: size,
+					cap: size,
+				},
+				typ:       TypeString,
+				timestamp: 0,
+				visited:   0,
+				padding:   0,
+			}
 			server.dict[key] = value
+			StringSetString(value.Bytes, args[2])
 		}
 		fmt.Fprintln(conn, "OK")
 	case "get":
@@ -115,62 +150,17 @@ func (server *Server) processCommand(cmd Command) {
 			fmt.Fprintln(conn, "key not found")
 			return
 		}
-		switch v := value.(type) {
-		case int64:
-			fmt.Fprintln(conn, v, "(integer)")
-		case string:
-			fmt.Fprintln(conn, v)
-		case []byte:
-			fmt.Fprintln(conn, string(v))
-		case List:
-			values := v.GetAll()
-			fmt.Fprintf(conn, "[")
-			for i, value := range values {
-				if i > 0 {
-					fmt.Fprint(conn, ", ")
-				}
-				fmt.Fprint(conn, string(value))
+		switch value.typ {
+		case TypeString:
+			switch StringEncoding(value.Bytes) {
+			case StringEncodingRaw:
+				fmt.Fprintln(conn, StringGetBytes(value.Bytes))
+			case StringEncodingString:
+				fmt.Fprintln(conn, string(StringGetBytes(value.Bytes)))
+			case StringEncodingInteger:
+				fmt.Fprintf(conn, "%d (integer)\n", StringGetInt(value.Bytes))
 			}
-			fmt.Fprint(conn, "]\n")
-		case []int16:
-			fmt.Fprintf(conn, "[")
-			for i, value := range v {
-				if i > 0 {
-					fmt.Fprint(conn, ", ")
-				}
-				fmt.Fprint(conn, value)
-			}
-			fmt.Fprintf(conn, "]\n(%d)\n", len(v))
-		case []int32:
-			fmt.Fprintf(conn, "[")
-			for i, value := range v {
-				if i > 0 {
-					fmt.Fprint(conn, ", ")
-				}
-				fmt.Fprint(conn, value)
-			}
-			fmt.Fprintf(conn, "]\n(%d)\n", len(v))
-		case []int64:
-			fmt.Fprintf(conn, "[")
-			for i, value := range v {
-				if i > 0 {
-					fmt.Fprint(conn, ", ")
-				}
-				fmt.Fprint(conn, value)
-			}
-			fmt.Fprintf(conn, "]\n(%d)\n", len(v))
-		default:
-			fmt.Fprintln(conn, v)
 		}
-
-	case "del":
-		key := string(args[1])
-		if _, ok := server.dict[key]; !ok {
-			fmt.Fprintln(conn, 0)
-			return
-		}
-		delete(server.dict, key)
-		fmt.Fprintln(conn, 1)
 	case "incr":
 		key := string(args[1])
 		delta, err := strconv.ParseInt(string(args[2]), 10, 64)
@@ -178,140 +168,19 @@ func (server *Server) processCommand(cmd Command) {
 			fmt.Fprintln(conn, "invalid delta")
 			return
 		}
-		v, ok := server.dict[key]
+
+		value, ok := server.getKey(key)
 		if !ok {
 			fmt.Fprintln(conn, "key not found")
 			return
 		}
-		i64, ok := v.(int64)
-		if !ok {
-			fmt.Println(conn, "key is not integer")
+		if value.typ != TypeString || StringEncoding(value.Bytes) != StringEncodingInteger {
+			fmt.Fprintln(conn, "key is not integer")
 			return
-		}
-		server.dict[key] = i64 + delta
-		fmt.Fprintln(conn, "OK")
-	case "push", "rpush":
-		key, value := string(args[1]), args[2]
-		var l List
-		v, ok := server.dict[key]
-		if !ok {
-			l = new(QuickList)
-			server.dict[key] = l
-		} else if l, ok = v.(List); !ok {
-			fmt.Fprintln(conn, "key is not a list")
-			return
-		}
-		l.Push(value)
-		fmt.Fprintf(conn, "(%d)\n", l.Size())
-	case "pop", "rpop":
-		key := string(args[1])
-		v, ok := server.dict[key]
-		if !ok {
-			fmt.Fprintln(conn, "key not found")
-			return
-		}
-		ll, ok := v.(List)
-		if !ok {
-			fmt.Fprintln(conn, "key is not linked list")
-			return
-		}
-		value := ll.Pop()
-		if value == nil {
-			fmt.Fprintln(conn, "empty linked list")
-		} else {
-			fmt.Fprintf(conn, "%s\n(%d)\n", string(value), ll.Size())
-		}
-	case "len":
-		key := string(args[1])
-		v, ok := server.dict[key]
-		if !ok {
-			fmt.Fprintln(conn, "key not found")
-			return
-		}
-		ll, ok := v.(List)
-		if !ok {
-			fmt.Fprintln(conn, "key is not linked list")
-			return
-		}
-		fmt.Fprintln(conn, ll.Size())
-	case "sadd":
-		key, value := string(args[1]), args[2]
-		if len(args) > 8 {
-			fmt.Fprintln(conn, "value is too big")
-			return
-		}
-		i64, err := strconv.ParseInt(string(value), 10, 64)
-		if err != nil {
-			padding := 8 - len(value)
-			value = append(make([]byte, padding), value...)
-			i64 = int64(binary.BigEndian.Uint64(value))
-		}
-		fmt.Println("sadd", key, i64)
-		is, ok := server.dict[key]
-		if !ok {
-			server.dict[key] = createIntset(i64)
-			fmt.Fprintln(conn, "(1)")
-			return
-		}
-		switch is.(type) {
-		case []int16, []int32, []int64:
-			is = intsetAdd(is, i64)
-			server.dict[key] = is
-			fmt.Fprintf(conn, "(%d)\n", sizeOfIntset(is))
-		default:
-			fmt.Fprintf(conn, "key is not a set")
-		}
-	case "sdel":
-		key, value := string(args[1]), args[2]
-		if len(args) > 8 {
-			fmt.Fprintln(conn, "value is too big")
-			return
-		}
-		i64, err := strconv.ParseInt(string(value), 10, 64)
-		if err != nil {
-			padding := 8 - len(value)
-			value = append(make([]byte, padding), value...)
-			i64 = int64(binary.BigEndian.Uint64(value))
-		}
-		is, ok := server.dict[key]
-		if !ok {
-			fmt.Fprintln(conn, "key not found")
-			return
-		}
-		switch is.(type) {
-		case []int16, []int32, []int64:
-			is = intsetDel(is, i64)
-			server.dict[key] = is
-			fmt.Fprintf(conn, "(%d)\n", sizeOfIntset(is))
-		default:
-			fmt.Fprintf(conn, "key is not a set")
 		}
 
-	case "slen":
-		key := string(args[1])
-		is, ok := server.dict[key]
-		if !ok {
-			fmt.Fprintln(conn, "key not found")
-			return
-		}
-		if encodingOfIntset(is) == 0 {
-			fmt.Fprintln(conn, "key is not set")
-			return
-		}
-		size := sizeOfIntset(is)
-		fmt.Fprintf(conn, "(%d)\n", size)
-	case "expire":
-		key, ttl := string(args[1]), string(args[2])
-		ms, err := strconv.ParseInt(ttl, 10, 64)
-		if err != nil {
-			fmt.Fprintln(conn, "invalid expire time")
-			return
-		}
-		if _, ok := server.getKey(key); !ok {
-			fmt.Fprintln(conn, "key not found")
-			return
-		}
-		server.expire[key] = time.Now().Add(time.Duration(ms) * time.Millisecond).UnixMilli()
+		i := StringIncr(value.Bytes, delta)
+		fmt.Fprintf(conn, "%d (integer)\n", i)
 	default:
 		fmt.Fprintln(conn, "invalid command")
 	}
