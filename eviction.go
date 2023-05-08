@@ -28,19 +28,25 @@ func (server *Server) tryEvict() {
 		}
 
 		size := offHeapSize
-		keysToDelete := make(map[string]Value)
-		for key, value := range server.dict {
-			if float64(size) >= float64(server.Options.Eviction.MaxOffHeapSize)*factor {
-				keysToDelete[key] = value
-				size -= value.cap
+		keysToDelete := make([]map[string]Value, len(server.dicts))
+		for i := 0; i < len(server.dicts); i++ {
+			keysToDelete[i] = make(map[string]Value)
+		}
+		for shardId, dict := range server.dicts {
+			for key, value := range dict {
+				if float64(size) >= float64(server.Options.Eviction.MaxOffHeapSize)*factor {
+					keysToDelete[shardId][key] = value
+					size -= value.cap
+				}
 			}
 		}
+
 		fmt.Println("eviction ...")
-		for key, value := range keysToDelete {
-			fmt.Printf("key <%s> is evicted\n", key)
-			delete(server.dict, key)
-			delete(server.expire, key)
-			Free(value.Bytes)
+		for shardId, keys := range keysToDelete {
+			for key, value := range keys {
+				fmt.Printf("key <%s> is evicted\n", key)
+				server.delKey(shardId, key, value)
+			}
 		}
 	}
 }

@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	server, err := godis.NewServer(":9000")
+	server, err := godis.NewServer(":9000", 11)
 	if err != nil {
 		panic(err)
 	}
