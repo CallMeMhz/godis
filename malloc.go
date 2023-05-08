@@ -4,6 +4,8 @@ import (
 	"syscall"
 )
 
+var offHeapSize int
+
 func Malloc(size int) Bytes {
 	return Bytes{
 		ptr: malloc(size),
@@ -25,6 +27,7 @@ func malloc(size int) uintptr {
 	if errno != 0 {
 		panic(errno)
 	}
+	offHeapSize += size
 	return p
 }
 
@@ -38,4 +41,5 @@ func free(ptr uintptr, size int) {
 	if errno != 0 {
 		panic(errno)
 	}
+	offHeapSize -= size
 }

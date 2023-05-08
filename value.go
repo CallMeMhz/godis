@@ -12,11 +12,11 @@ const (
 type Value struct {
 	Bytes
 
-	typ int8
+	// lfu
+	last  int32
+	count int8 // todo logistic count
 
-	// todo lfu
-	timestamp int16
-	visited   int8
+	typ int8
 
 	padding int16
 }

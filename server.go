@@ -14,6 +14,13 @@ type Server struct {
 	dict   map[string]Value
 	expire map[string]int64
 	cmds   chan Command
+
+	Options struct {
+		Eviction struct {
+			Policy         int
+			MaxOffHeapSize int
+		}
+	}
 }
 
 func NewServer(addr string) (*Server, error) {
@@ -72,6 +79,7 @@ func (server *Server) mainLoop() {
 		select {
 		case cmd := <-server.cmds:
 			server.processCommand(cmd)
+			server.tryEvict()
 		case <-ticker.C:
 			server.pruneExpiredKeys()
 		}
@@ -89,6 +97,8 @@ func (server *Server) getKey(key string) (Value, bool) {
 		delete(server.expire, key)
 		return Value{}, false
 	}
+	value.last = int32(time.Now().Unix())
+	value.count++
 	return value, true
 }
 
@@ -110,11 +120,11 @@ func (server *Server) processCommand(cmd Command) {
 				}
 				size := 1 + 8
 				value := Value{
-					Bytes:     Malloc(size),
-					typ:       TypeString,
-					timestamp: 0,
-					visited:   0,
-					padding:   0,
+					Bytes:   Malloc(size),
+					typ:     TypeString,
+					last:    0,
+					count:   0,
+					padding: 0,
 				}
 				server.dict[key] = value
 				StringSetInt(value.Bytes, i64)
@@ -125,11 +135,11 @@ func (server *Server) processCommand(cmd Command) {
 			}
 			size := 1 + len(args[2])
 			value := Value{
-				Bytes:     Malloc(size),
-				typ:       TypeString,
-				timestamp: 0,
-				visited:   0,
-				padding:   0,
+				Bytes:   Malloc(size),
+				typ:     TypeString,
+				last:    0,
+				count:   0,
+				padding: 0,
 			}
 			server.dict[key] = value
 			StringSetString(value.Bytes, args[2])
@@ -206,6 +216,9 @@ func (server *Server) processCommand(cmd Command) {
 
 		i := StringIncr(value.Bytes, delta)
 		fmt.Fprintf(conn, "%d (integer)\n", i)
+	case "status":
+		fmt.Fprintf(conn, "Options:%+v\n", server.Options)
+		fmt.Fprintf(conn, "OffHeapSize: %d\n", offHeapSize)
 	default:
 		fmt.Fprintln(conn, "invalid command")
 	}
