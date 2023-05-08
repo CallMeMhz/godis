@@ -3,7 +3,6 @@ package godis
 import (
 	"bytes"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net"
 	"strconv"
@@ -102,21 +101,18 @@ func (server *Server) mainLoop() {
 	}
 }
 
-func (server *Server) partitioner(key string) int {
-	hash := fnv.New32a()
-	hash.Write([]byte(key))
-	i := int(hash.Sum32()) % len(server.dicts)
-	return i
+func (server *Server) partitioner(key string) uint64 {
+	return Sum64(key) & uint64(len(server.dicts)-1)
 }
 
-func (server *Server) getKey(shardId int, key string) (Value, bool) {
-	value, ok := server.dicts[shardId][key]
+func (server *Server) getKey(shardID uint64, key string) (Value, bool) {
+	value, ok := server.dicts[shardID][key]
 	if !ok {
 		return Value{}, false
 	}
 	// lazy prune
-	if ddl, ok := server.expire[shardId][key]; ok && time.Now().UnixNano() >= ddl {
-		server.delKey(shardId, key, value)
+	if ddl, ok := server.expire[shardID][key]; ok && time.Now().UnixNano() >= ddl {
+		server.delKey(shardID, key, value)
 		return Value{}, false
 	}
 	value.last = int32(time.Now().Unix())
@@ -124,13 +120,13 @@ func (server *Server) getKey(shardId int, key string) (Value, bool) {
 	return value, true
 }
 
-func (server *Server) setKey(shardId int, key string, value Value) {
-	server.dicts[shardId][key] = value
+func (server *Server) setKey(shardID uint64, key string, value Value) {
+	server.dicts[shardID][key] = value
 }
 
-func (server *Server) delKey(shardId int, key string, value Value) {
-	delete(server.dicts[shardId], key)
-	delete(server.expire[shardId], key)
+func (server *Server) delKey(shardID uint64, key string, value Value) {
+	delete(server.dicts[shardID], key)
+	delete(server.expire[shardID], key)
 	Free(value.Bytes)
 }
 
@@ -142,11 +138,11 @@ func (server *Server) processCommand(cmd Command) {
 	switch string(args[0]) {
 	case "set":
 		key := string(args[1])
-		shardId := server.partitioner(key)
-		server.latchs[shardId].Lock()
-		defer server.latchs[shardId].Unlock()
+		shardID := server.partitioner(key)
+		server.latchs[shardID].Lock()
+		defer server.latchs[shardID].Unlock()
 
-		value, exists := server.getKey(shardId, key)
+		value, exists := server.getKey(shardID, key)
 		if i64, err := strconv.ParseInt(string(args[2]), 10, 64); err == nil {
 			if exists && value.typ == TypeString && StringEncoding(value.Bytes) == StringEncodingInteger {
 				StringSetInt(value.Bytes, i64)
@@ -162,7 +158,7 @@ func (server *Server) processCommand(cmd Command) {
 					count:   0,
 					padding: 0,
 				}
-				server.setKey(shardId, key, value)
+				server.setKey(shardID, key, value)
 				StringSetInt(value.Bytes, i64)
 			}
 		} else {
@@ -177,18 +173,18 @@ func (server *Server) processCommand(cmd Command) {
 				count:   0,
 				padding: 0,
 			}
-			server.setKey(shardId, key, value)
+			server.setKey(shardID, key, value)
 			StringSetString(value.Bytes, args[2])
 		}
 		fmt.Fprintln(conn, "OK")
 	case "get":
 		key := string(args[1])
-		shardId := server.partitioner(key)
-		server.latchs[shardId].Lock()
-		defer server.latchs[shardId].Unlock()
+		shardID := server.partitioner(key)
+		server.latchs[shardID].Lock()
+		defer server.latchs[shardID].Unlock()
 
 		fmt.Println("get", key)
-		value, ok := server.getKey(shardId, key)
+		value, ok := server.getKey(shardID, key)
 		if !ok {
 			fmt.Fprintln(conn, "key not found")
 			return
@@ -206,40 +202,40 @@ func (server *Server) processCommand(cmd Command) {
 		}
 	case "del":
 		key := string(args[1])
-		shardId := server.partitioner(key)
-		server.latchs[shardId].Lock()
-		defer server.latchs[shardId].Unlock()
+		shardID := server.partitioner(key)
+		server.latchs[shardID].Lock()
+		defer server.latchs[shardID].Unlock()
 
 		// todo victim
-		value, ok := server.getKey(shardId, key)
+		value, ok := server.getKey(shardID, key)
 		if !ok {
 			fmt.Fprintln(conn, "key not found")
 			return
 		}
-		server.delKey(shardId, key, value)
+		server.delKey(shardID, key, value)
 		fmt.Fprintln(conn, "OK")
 	case "expire":
 		key := string(args[1])
-		shardId := server.partitioner(key)
-		server.latchs[shardId].Lock()
-		defer server.latchs[shardId].Unlock()
+		shardID := server.partitioner(key)
+		server.latchs[shardID].Lock()
+		defer server.latchs[shardID].Unlock()
 
 		delay, err := strconv.ParseInt(string(args[2]), 10, 64)
 		if err != nil || delay < 0 {
 			fmt.Fprintln(conn, "invalid delay ms")
 			return
 		}
-		_, ok := server.getKey(shardId, key)
+		_, ok := server.getKey(shardID, key)
 		if !ok {
 			fmt.Fprintln(conn, "key not found")
 			return
 		}
 		if delay > 0 {
 			ttd := time.Now().Add(time.Duration(delay) * time.Millisecond)
-			server.expire[shardId][key] = ttd.UnixNano()
+			server.expire[shardID][key] = ttd.UnixNano()
 			fmt.Fprintf(conn, "(TTD: %v)\n", ttd)
 		} else {
-			delete(server.expire[shardId], key)
+			delete(server.expire[shardID], key)
 			fmt.Fprintln(conn, "(TTD: never forever)")
 		}
 	case "ttl":
@@ -258,9 +254,9 @@ func (server *Server) processCommand(cmd Command) {
 
 	case "incr":
 		key := string(args[1])
-		shardId := server.partitioner(key)
-		server.latchs[shardId].Lock()
-		defer server.latchs[shardId].Unlock()
+		shardID := server.partitioner(key)
+		server.latchs[shardID].Lock()
+		defer server.latchs[shardID].Unlock()
 
 		delta, err := strconv.ParseInt(string(args[2]), 10, 64)
 		if err != nil {
@@ -268,7 +264,7 @@ func (server *Server) processCommand(cmd Command) {
 			return
 		}
 
-		value, ok := server.getKey(shardId, key)
+		value, ok := server.getKey(shardID, key)
 		if !ok {
 			fmt.Fprintln(conn, "key not found")
 			return
@@ -296,20 +292,21 @@ func (server *Server) pruneExpiredKeys() {
 	}
 
 	var counter int
-	for shardId, dict := range server.dicts {
-		expire := server.expire[shardId]
+	for shardID, dict := range server.dicts {
+		expire := server.expire[shardID]
 		for key, value := range dict {
 			if counter++; counter >= 20 {
 				break
 			}
 			if ddl, ok := expire[key]; ok && time.Now().UnixMilli() >= ddl {
-				keysToDelete[shardId][key] = value
+				keysToDelete[shardID][key] = value
 			}
 		}
 	}
 
 	counter = 0
-	for shardId, keys := range keysToDelete {
+	for i, keys := range keysToDelete {
+		shardId := uint64(i)
 		for key, value := range keys {
 			fmt.Printf("key %s is pruned\n", key)
 			server.delKey(shardId, key, value)
