@@ -83,6 +83,7 @@ func (server *Server) getKey(key string) (Value, bool) {
 	if !ok {
 		return Value{}, false
 	}
+	// lazy prune
 	if ddl, ok := server.expire[key]; ok && time.Now().UnixMilli() >= ddl {
 		delete(server.dict, key)
 		delete(server.expire, key)
@@ -161,6 +162,38 @@ func (server *Server) processCommand(cmd Command) {
 				fmt.Fprintf(conn, "%d (integer)\n", StringGetInt(value.Bytes))
 			}
 		}
+	case "del":
+		key := string(args[1])
+		// todo victim
+		value, ok := server.getKey(key)
+		if !ok {
+			fmt.Fprintln(conn, "key not found")
+			return
+		}
+		delete(server.dict, key)
+		delete(server.expire, key)
+		Free(value.ptr, value.cap)
+		fmt.Println(conn, "OK")
+	case "expire":
+		key := string(args[1])
+		delay, err := strconv.ParseInt(string(args[2]), 10, 64)
+		if err != nil || delay < 0 {
+			fmt.Fprintln(conn, "invalid delay ms")
+			return
+		}
+		_, ok := server.getKey(key)
+		if !ok {
+			fmt.Fprintln(conn, "key not found")
+			return
+		}
+		if delay > 0 {
+			ttd := time.Now().Add(time.Duration(delay) * time.Millisecond)
+			server.expire[key] = ttd.UnixMilli()
+			fmt.Fprintf(conn, "(TTD: %v)\n", ttd)
+		} else {
+			delete(server.expire, key)
+			fmt.Fprintln(conn, "(TTD: never forever)")
+		}
 	case "incr":
 		key := string(args[1])
 		delta, err := strconv.ParseInt(string(args[2]), 10, 64)
@@ -187,7 +220,7 @@ func (server *Server) processCommand(cmd Command) {
 }
 
 func (server *Server) pruneExpiredKeys() {
-	fmt.Println("pruning expired keys")
+	fmt.Println("pruning expired keys ...")
 	var deletedKeys []string
 	var counter int
 	for key := range server.dict {
@@ -199,6 +232,7 @@ func (server *Server) pruneExpiredKeys() {
 		}
 	}
 	for _, key := range deletedKeys {
+		fmt.Printf("key %s is pruned\n", key)
 		delete(server.dict, key)
 		delete(server.expire, key)
 	}
